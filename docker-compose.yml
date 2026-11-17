@@ -1,0 +1,138 @@
+name: mucard-infra
+
+# Infraestructura compartida de muCARD (F0.7)
+# Uso: cp .env.example .env && docker compose up -d
+#
+# Puertos en el host:
+#   Kafka (desde el host)  localhost:29092
+#   Kafka UI               http://localhost:8085
+#   MongoDB                localhost:27017
+#   PostgreSQL             localhost:5432
+#   Couchbase UI           http://localhost:8091
+
+services:
+  kafka:
+    image: apache/kafka:3.8.0
+    container_name: mucard-kafka
+    ports:
+      - "29092:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://:9092,EXTERNAL://:29092,CONTROLLER://:9093
+      # INTERNAL: contenedores y pods de Kind (kafka:9092)
+      # EXTERNAL: procesos corriendo en tu maquina (localhost:29092)
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Provisional hasta cerrar F0.4 (contrato de topics); luego crear topics explicitos
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    networks: [mucard-net]
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: mucard-kafka-ui
+    ports:
+      - "8085:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: mucard
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks: [mucard-net]
+
+  mongo:
+    image: mongo:7
+    container_name: mucard-mongo
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD}
+      MONGO_INITDB_DATABASE: ${MONGO_DB}
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand(\"ping\").ok' -u ${MONGO_USER} -p ${MONGO_PASSWORD} --authenticationDatabase admin | grep 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [mucard-net]
+
+  postgres:
+    image: postgres:16
+    container_name: mucard-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [mucard-net]
+
+  couchbase:
+    image: couchbase:community-7.2.4
+    container_name: mucard-couchbase
+    ports:
+      - "8091-8094:8091-8094"
+      - "11210:11210"
+    volumes:
+      - couchbase-data:/opt/couchbase/var
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8091/pools > /dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    networks: [mucard-net]
+
+  # Contenedor de un solo uso: inicializa el cluster Couchbase y crea el bucket.
+  # Las colecciones e indices son de F1.2 (Jhon).
+  couchbase-init:
+    image: couchbase:community-7.2.4
+    container_name: mucard-couchbase-init
+    depends_on:
+      couchbase:
+        condition: service_healthy
+    environment:
+      CB_HOST: couchbase
+      CB_USER: ${COUCHBASE_USER}
+      CB_PASSWORD: ${COUCHBASE_PASSWORD}
+      CB_BUCKET: ${COUCHBASE_BUCKET}
+    volumes:
+      - ./couchbase-init.sh:/init.sh:ro
+    entrypoint: ["/bin/bash", "/init.sh"]
+    restart: "no"
+    networks: [mucard-net]
+
+networks:
+  mucard-net:
+    name: mucard-net
+
+volumes:
+  kafka-data:
+  mongo-data:
+  postgres-data:
+  couchbase-data:
